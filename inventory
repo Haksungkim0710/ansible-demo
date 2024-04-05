@@ -1,4 +1,4 @@
-[controlplanes]
+[controlplane]
 servera.example.com
 
 [worker_nodes]

@@ -1,0 +1,167 @@
+- name: Configure SELinux to permissive mode
+  hosts: all
+  tasks:
+    - name: Set SELinux to permissive mode
+      selinux:
+        policy: targeted
+        state: permissive
+
+- name: Stop firewalld
+  hosts: all
+  tasks:
+    - name: Stop firewalld service
+      service:
+        name: firewalld
+        state: stopped
+    
+- name: Swap off on runtime
+  hosts: all
+  tasks:
+    - name: Turn off swap at runtime 
+      command: swapoff -a
+
+- name: swap off on fstab
+  hosts: all
+  tasks:
+    - name: Remove swap entry from fstab
+      mount:
+        name: none
+        fstype: swap
+        state: absent
+
+- name: Configuring the Kernel Module
+  hosts: all
+  tasks:
+    - name: Load Kernel Modules
+      shell: |
+        sudo modprobe overlay
+        sudo modprobe br_netfilter
+
+    - name: Set Kernel Parameters
+      command: |
+        sudo sysctl --system net.bridge.bridge-nf-call-ip6tables = 1
+        sudo sysctl --system net.bridge.bridge-nf-call-iptables = 1
+        sudo sysctl --system net.ipv4.ip_forward = 1
+
+
+- name: Add Docker repository
+  hosts: all
+  tasks:
+    - name: Download Docker repository file
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/centos/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+
+- name: Add Kubernetes repository
+  hosts: all
+  tasks:
+    - name: Import Kubernetes GPG key
+      ansible.builtin.rpm_key:
+        key: https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key
+        state: present
+
+    - name: Add Kubernetes repository URL
+      ansible.builtin.ini_file:
+        path: /etc/yum.repos.d/kubernetes.repo
+        section: kubernetes
+        option: "{{ item.key }}"
+        value: "{{ item.value }}"
+      loop:
+        - { key: "name", value: "Kubernetes" }
+        - { key: "baseurl", value: "https://pkgs.k8s.io/core:/stable:/v1.29/rpm/" }
+        - { key: "enabled", value: "1" }
+        - { key: "gpgcheck", value: "1" }
+        - { key: "gpgkey", value: "https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key" }
+
+- name: Install Docker and Kubernetes packages
+  hosts: all
+  tasks:
+    - name: Install Docker
+      ansible.builtin.package:
+        name: docker-ce
+        state: present
+
+    - name: Install Kubernetes components
+      ansible.builtin.package:
+        name:
+          - containerd
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Containerd configuration
+      ansible.builtin.command:
+        cmd: containerd config default > /etc/containerd/config.toml
+      become: true
+
+    - name: Ensure /etc/containerd/certs.d directory exists
+      ansible.builtin.file:
+        path: /etc/containerd/certs.d
+        state: directory
+        mode: '0755'
+
+    - name: Update SystemdCgroup to true in config.toml
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*=\s*false\s*$'
+        line: 'SystemdCgroup = true'
+
+    - name: Set config_path in config.toml
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*config_path\s*=\s*""\s*$'
+        line: 'config_path="/etc/containerd/certs.d"'
+
+    - name: Start and Enable Containerd
+      ansible.builtin.systemd:
+        state: started
+        enabled: true
+        name: containerd
+
+    - name: Start and Enable kubadm
+      ansible.builtin.systemd:
+        state: started
+        enabled: true
+        name: kubelet
+
+    - name: Install dnsmasq on control panel
+      ansible.builtin.yum:
+        state: latest
+        name: dnsmasq
+      when: inventory_hostname == 'servera.example.com'
+
+    - name: Copy /etc/hosts to Servera
+      ansible.builtin.copy:
+        src: /etc/hosts
+        dest: /etc/hosts
+      when: inventory_hostname == 'servera.example.com'
+
+    - name: Copy /etc/hosts to Serverb, Serverc
+      ansible.builtin.copy:
+        src: /etc/hosts
+        dest: /etc/resolv.conf
+      when: inventory_hostname == 'serverb.example.com, serverc.example.com'
+
+    - name: Start and Enable dnsmasq
+      ansible.builtin.systemd:
+        state: started
+        enabled: true
+        name: dnsmasq
+      when: inventory_hostname == 'servera.example.com' 
+ 
+    - name: init cluster
+      shell: |
+        kubeadm init --apiserver-advertise-address=172.16.0.101 \
+        --pod-network-cidr=192.168.0.0/16 \
+        --token=kdigit.1234567890hellow
+      when: inventory_hostname in groups['controlplanes']
+      ignore_errors: yes
+
+    - name: join cluster
+      shell: |
+        kubeadm join --token=kdigit.1234567890hellow \
+                     --discovery-token-unsafe-skip-ca-verification
+                     172.16.0.101:6443
+      when: inventory_hostname in groups['worker_nodes']
+
